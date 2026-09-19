@@ -191,6 +191,18 @@ public final class KeyTrigger {
     private static final int TOTAL_MAX_TICKS = 30;
 
     private enum Stage {
+        /**
+         * 刚登记、还没决定走哪条路。
+         *
+         * <p>正常情况下同一拍就离开它（{@link #trigger} 紧接着就会写上真正的阶段）。
+         * 还看到它，说明那一拍在"登记"与"写阶段"之间抛了异常（{@link #trigger} 里
+         * 先挂 {@code pending} 再接修饰键租约，正是为了这种情况下租约还能被收回）——
+         * 那一次触发整个作废，走 {@link #giveUp}，连同让开的修饰键一起收回。
+         *
+         * <p>没有这个取值的话，那种情况下 {@code stage} 是 {@code null}，下一拍的
+         * {@code switch} 会 NPE —— 那就是"为了防一次租约残留，换来游戏崩掉"。
+         */
+        STARTING,
         /** 界面开着时就地注入的，等模组消费（键位没声明只在世界里生效的那一类） */
         INJECTED_IN_GUI,
         /** 键位声明了只在世界里生效：先请手机让开，注入留到没有界面之后 —— 一次到位 */
@@ -203,7 +215,7 @@ public final class KeyTrigger {
 
     private static final class Pending {
         final KeyMapping mapping;
-        Stage stage;
+        Stage stage = Stage.STARTING;
 
         /** 这一段（{@link Stage} 的那两段）已经等了几拍。{@link #injectWithNoScreen} 会把它归零 */
         int age;
@@ -254,6 +266,8 @@ public final class KeyTrigger {
         // （哪怕是 LOGGER 那一行），就会变成"有租约、没有 pending"—— 此后没有任何一拍
         // 会去收它，玩家的 Ctrl 就永久停在"没有"上。先挂 pending，tick() 那一侧才有机会
         // 走 release() 把租约兜回来。
+        // 挂上时它的阶段是 Stage.STARTING（不是 null）：真在这中间抛了，下一拍走 STARTING
+        // 那一支，把这一次作废、连带把租约收回 —— 见那个取值的注释。
         pending = p;
 
         // 【先让开声明的修饰键】，理由见类注释「第三条：键位声明的修饰键」。
@@ -370,6 +384,13 @@ public final class KeyTrigger {
         boolean consumed = HotkeyBackend.pending(p.mapping) == 0;
 
         switch (p.stage) {
+            case STARTING -> {
+                // 登记了、但那一拍没能走到"写阶段"（trigger 在中间抛了）。这一次作废，
+                // 连同让开的修饰键一起收回 —— 见 Stage.STARTING 的注释。
+                // 【这里不能看 consumed】：这个阶段压根没注入过，队列本来就是空的，
+                // 拿它当"有人消费了"会把一次根本没发生的触发报成成功。
+                giveUp(p, "登记之后没能开始");
+            }
             case INJECTED_IN_GUI -> {
                 if (consumed) {
                     succeed(p);

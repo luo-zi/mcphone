@@ -135,10 +135,19 @@ jobs:
 
       # 名字上带出 buildable —— 一个还没翻 buildable 的目标出的 jar 是拿来试跑的，
       # 不是候选发布包。名字里不说，下载的人分不出来。
+      #
+      # 【这个判断只能写成 `!= 'true' && '-未验证' || ''`，不能反过来写成
+      # `== 'true' && '' || '-未验证'`】。GitHub 表达式里空串是【假】，所以
+      # 「真 && '' || '-未验证'」不会停在 ''，会继续落到 '-未验证' —— 那个写法恒走兜底。
+      # 后果不是名字难看：三个 buildable: true 的目标产物【全都】叫「-未验证」，
+      # 下载的人分不出哪个是候选发布包，而构建全绿、测试全绿，没有任何东西会红。
+      #
+      # 这个名字只有下载的人在用：release.yml 发的是它自己汇总出来的 mcphone-jars，
+      # 不读这里，所以改它不影响发版。
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: mcphone-${{ matrix.target }}${{ steps.b.outputs.buildable == 'true' && '' || '-未验证' }}
+          name: mcphone-${{ matrix.target }}${{ steps.b.outputs.buildable != 'true' && '-未验证' || '' }}
           path: dist/*.jar
           retention-days: 30
 

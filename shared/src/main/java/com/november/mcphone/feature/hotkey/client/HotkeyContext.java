@@ -25,6 +25,19 @@ package com.november.mcphone.feature.hotkey.client;
  * {@code IKeyConflictContext} 是<b>接口</b>，模组完全可以自己实现一个（比如"只在骑乘时生效"）。
  * 那种上下文是什么意思我们不知道，就不冒充知道：如实标成"其它"，触发那边照旧走
  * 「先在界面里试一次、没人取再收手机」那条通用路（也就是 {@link #closePhoneFirst()} 为 false）。
+ *
+ * <h2>它只是「按一下」的一半</h2>
+ *
+ * 在 Forge 系的目标上，键位作者常把条件写成一整句
+ * {@code consumeClick() && isConflictContextAndModifierActive()}：本枚举管的是那句话里的
+ * 「场景」，另一半是<b>修饰键</b>（{@code KeyModifier}，也就是 {@code Ctrl + T} 里的那个 Ctrl）。
+ * 修饰键不在本枚举里，不是因为它不重要，而是因为它不是"玩家该看见的标签"那种东西 ——
+ * 它要解决的是"触发的时候把那个要求让开"（模组那边看到的就是"没人拦着"，不是我们替玩家
+ * 按住了 Ctrl；本功能不合成任何 GLFW 输入），落在 {@code HotkeyBackend} 的
+ * {@code gatesOnModifier / suspendModifier / restoreModifier} 与 {@link KeyTrigger} 那边
+ * （两处的类注释都有一节叫「第三条」／「「按下」的完整契约」）。分开之后，这一页上的标签
+ * 仍然只有四个值，而且每个值都真的有话可说；神化那个开「世界层级选择」的键位
+ * （Ctrl + T）就是被这一半挡住的。
  */
 public enum HotkeyContext {
 

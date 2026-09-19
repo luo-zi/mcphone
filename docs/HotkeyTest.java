@@ -42,6 +42,9 @@ import java.util.Set;
  *   <li>注入回路本体：{@code pending} / {@code injectClick} / {@code reset} 的实际行为，
  *       以及它与原版 {@code consumeClick()} 能不能接上（见上）。</li>
  *   <li>{@code contextOf()}：对一个刚造出来、没声明过上下文的键位返回 {@link HotkeyContext#ANY}。</li>
+ *   <li><b>修饰键租约的空转面</b>：没声明修饰键的键位上，{@code gatesOnModifier} 恒 false，
+ *       {@code suspendModifier} / {@code restoreModifier} 怎么调都不许留下痕迹。
+ *       有内容的断言在平台自己的 docs/ 里，理由见下一节。</li>
  * </ul>
  *
  * <h2>这里测不了什么</h2>
@@ -59,6 +62,15 @@ import java.util.Set;
  *       {@code IN_GAME}，得把它注册进真客户端的 {@code Options} —— 那是游戏里的事。</li>
  *   <li><b>跨 tick 的时序与「一次只处理一个」。</b> 那两个性质长在 {@link KeyTrigger} 的状态机上，
  *       而它们每一步都要 {@code Minecraft} 实例。这里没有 tick，也就没有时序。</li>
+ *   <li><b>修饰键的真语义（声明了修饰键的键位）。</b>「这个键位声明的到底是不是 Ctrl」
+ *       「让开之后它变成什么」「让开前那个值记在哪」全都要 {@code KeyModifier} /
+ *       {@code KeyConflictContext} 这两个 Forge 系专有的类型才说得出口，而本节最后那段
+ *       不许本文件 import 任何加载器包 —— 所以这里只钉得住「没有修饰键时三件事都空转」。
+ *       真正的租约（让开 → 幂等 → 收回 → 幂等，且键码一个字不动）钉在平台自己的
+ *       {@code platforms/<目标>/docs/HotkeyModifierTest.java}：那一份只对着一个目标编译、
+ *       只在那一个目标上跑，才准写加载器类型。两条路都够不到的是最后一跳 ——
+ *       {@code KeyModifier.CONTROL.isActive()} 走 {@code Screen.hasControlDown()} →
+ *       {@code Minecraft.getInstance().getWindow()}，无头 JVM 里必 NPE，只能在真客户端里验。</li>
  * </ul>
  *
  * <h2>为什么只接 RuntimeException，不接 Error</h2>
@@ -209,12 +221,43 @@ public final class HotkeyTest {
                 "没声明过上下文的键位：三边都该是 ANY（默认不许被当成「只在世界里生效」）");
     }
 
+    /**
+     * 6. 修饰键租约的<b>空转面</b>：没有声明修饰键的键位上，三件事都不许有副作用。
+     * （有内容的断言在平台自己的 docs/ 里，理由见类注释最后那段「不许 import 加载器包」。）
+     */
+    static void modifierGates() {
+        KeyMapping plain = newMapping("key.mcphone.hotkey.test.modifier");
+
+        // 把「没声明修饰键」判成「要求修饰键」的代价是双向的：面板上会给一个根本没有修饰键的
+        // 键位标出 Ctrl/Shift，玩家照着提示去按、还是点不动；而让开/收回那一对也会为它白记一笔。
+        check(!HotkeyBackend.gatesOnModifier(plain),
+                "没声明修饰键的键位：gatesOnModifier 必须是 false（判成 true，面板就会把一个不存在的修饰键说成有）");
+
+        // 让开一次：空转就该是彻底的，不许把状态改成「看着像要求修饰键」。
+        HotkeyBackend.suspendModifier(plain);
+        check(!HotkeyBackend.gatesOnModifier(plain),
+                "让开一个没声明修饰键的键位之后：仍然不许变成「要求修饰键」");
+
+        HotkeyBackend.restoreModifier(plain);
+        check(!HotkeyBackend.gatesOnModifier(plain),
+                "收回之后：仍然不许变成「要求修饰键」");
+
+        // 【多调一次必须不抛】。KeyTrigger 的每一个出口都会调一次 restoreModifier（成功、放弃、
+        // 中途离开世界），而「这一次到底让开过没有」它自己不必记 —— 那一笔记在 HotkeyBackend 里，
+        // 晚到的那几次本来就该是空转。这里多调的这一次就是那个晚到的出口：它要是抛，
+        // 玩家看到的是遥控器在收尾时炸掉，而不是一次普通的触发失败。
+        HotkeyBackend.restoreModifier(plain);
+        check(!HotkeyBackend.gatesOnModifier(plain),
+                "收回多调一次不许抛、也不许留下痕迹（KeyTrigger 的每个出口都会调它一次）");
+    }
+
     public static void main(String[] args) {
         group("1 上下文声明", HotkeyTest::contexts);
         group("2 展开状态", HotkeyTest::groups);
         group("3 可用性", HotkeyTest::availability);
         group("4 注入回路", HotkeyTest::injection);
         group("5 默认上下文", HotkeyTest::contextOfDefault);
+        group("6 修饰键空转", HotkeyTest::modifierGates);
 
         System.out.println("断言 " + checks + " 条");
         if (!failures.isEmpty()) {

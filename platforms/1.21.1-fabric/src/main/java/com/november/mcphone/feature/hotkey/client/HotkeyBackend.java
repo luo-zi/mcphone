@@ -66,6 +66,37 @@ import net.minecraft.client.KeyMapping;
  * 所以这里要的是 {@code mc.options.keyMappings} 里那<b>一个</b>实例，直接动它自己的计数器。
  * 那个数组是公开的，对象拿得到；缺的只是读写入口，就是上面那个 access widener 补的。
  *
+ * <h2>为什么这一支没有修饰键这件事</h2>
+ *
+ * Forge 系的目标上，键位作者常把条件写成一整句
+ * {@code consumeClick() && isConflictContextAndModifierActive()} —— 后半截里除了「场景」，
+ * 还有<b>修饰键</b>（{@code Ctrl + T} 里的那个 Ctrl，也就是 {@code KeyModifier.CONTROL}），
+ * 而它的 {@code isActive()} 读的是 GLFW 的物理按键状态。遥控器只注了一次「边沿」、
+ * 没有任何键被按住，于是那一句 {@code &&} 右边是 false：动作不发生，而遥控器看到队列归 0
+ * 还报成功（完整的失效过程写在 neoforge 那份的「「按下」的完整契约」一节）。
+ * 那两份因此多了 {@code gatesOnModifier / suspendModifier / restoreModifier}。
+ *
+ * <p><b>这件事在本目标上不存在，不是"还没做"。</b>{@code KeyModifier} 与
+ * {@code IKeyConflictContext} 一样，都是 Forge / NeoForge 给 {@code KeyMapping} 打的补丁：
+ * 原版类上没有那个字段、没有那个访问器，模组<b>没有办法</b>在 {@code KeyMapping} 上声明
+ * 修饰键。既然声明根本不存在，就没有"已声明却被挡住"的键位，也没有那个要修的等式
+ * —— 能被让开的东西是空的。
+ *
+ * <p>那 Fabric 上的模组想写 Ctrl + T 怎么办？它只能自己去查 {@code Screen.hasControlDown()}
+ * —— 那正是 Forge 系 {@code KeyModifier} 内部干的事，而模组自己写的那一句遥控器够不着；
+ * 这类键位遥控器够不着，而结果分两种、不能混为一谈：<b>完全不碰</b>
+ * {@code consumeClick()} 队列的（例如只听原始输入事件），那一次注入没人取，会被如实报成
+ * "触发不了"；<b>既轮询队列、又自己加了一句物理键判断</b>的，点击会被它取走却什么都不做，
+ * 于是被报成成功 —— 两种都写在 {@link KeyTrigger} 的覆盖边界一节里。
+ * 反过来那条路（干脆替它合成一次真的 Ctrl 按键）走不通：
+ * 那要动的是全局输入状态 —— 按下与抬起必须配对，期间所有读物理按键的地方都会看见它，
+ * 而"不合成输入、不要求绑键"正是这个功能一开始就定下的边界。
+ *
+ * <p><b>共用侧照样调这三个方法。</b>签名与另外那两份逐字相同（共用侧直接 import），
+ * 调用点因此不必按目标写分支，本目标这三个实现只是空转 —— 不抛、不留痕迹。
+ * 这与上一节 {@link #contextOf} 恒为 {@link HotkeyContext#ANY} 是同一件事的两面：
+ * 本平台缺的那个声明，如实按缺了处理。
+ *
  * <h2>为什么非要有 {@link #reset} 不可</h2>
  *
  * 因为「关掉界面会把队列清干净」这件事是<b>假的</b>。{@code KeyMapping.releaseAll()}
@@ -103,9 +134,11 @@ import net.minecraft.client.KeyMapping;
  * 这个类在三个平台上各有一份同名同签名的副本 —— 与 {@code platform.Slots}、
  * {@code platform.StackCodecs} 同一个套路。共用侧（{@code feature/hotkey/client/KeyTrigger}）
  * 直接 import 它，于是「三份签名必须一致」这件事由编译器保证：共用侧要在所有目标上
- * 都编得过。三份里的方法体各写各的：本目标与 neoforge 的差别只有两处
- * —— 入口是 access widener 而不是 {@code META-INF/accesstransformer.cfg}，
- * 以及 {@link #contextOf} 没有声明可读（见上一节），不是能力上的缺口。
+ * 都编得过。三份里的方法体各写各的：本目标与 neoforge / forge 的差别只有三处
+ * —— 入口是 access widener 而不是 {@code META-INF/accesstransformer.cfg}；
+ * {@link #contextOf} 没有声明可读（见前面那一节）；以及修饰键那一套在这里没有对应物
+ * （见「为什么这一支没有修饰键这件事」一节），三个方法全是空转。
+ * 三处都是本平台上的字面事实，不是能力上的缺口。
  */
 public final class HotkeyBackend {
 
@@ -152,6 +185,40 @@ public final class HotkeyBackend {
      */
     public static void reset(KeyMapping mapping) {
         mapping.clickCount = 0;
+    }
+
+    /**
+     * 这个键位声明了修饰键吗 —— <b>本目标上恒为 false</b>。
+     *
+     * <p>原版 {@code KeyMapping} 上没有 {@code KeyModifier} 这个概念（那是 Forge 系打的补丁），
+     * 模组声明不了，所以这里不存在"要点亮却点不亮"的那一类。理由与后果写在类注释的
+     * 「为什么这一支没有修饰键这件事」一节里。
+     *
+     * <p>参数不用是对的：本方法不看它。签名与另外两个目标逐字相同（共用侧直接 import），
+     * 所以照旧收着 —— 共用侧的调用点因此不必按目标写分支。
+     */
+    public static boolean gatesOnModifier(KeyMapping mapping) {
+        return false;
+    }
+
+    /**
+     * 替玩家把声明的修饰键让开 —— <b>本目标上没有可让开的东西</b>，所以什么都不做。
+     *
+     * <p>不抛、不留痕迹：这里连静态表都没有（对比另外两份那个 {@code SUSPENDED}），
+     * 因为"已经让开过一次"这种状态在本平台上不会出现，"恢复原先的修饰键"自然也无从谈起。
+     */
+    public static void suspendModifier(KeyMapping mapping) {
+        // 空转：原版 KeyMapping 上没有修饰键可让开，见类注释那一节
+    }
+
+    /**
+     * 把让开的修饰键放回去 —— <b>本目标上没有让开过</b>，所以什么都不做。
+     *
+     * <p>与 {@link #suspendModifier} 一样是空转（空函数天然幂等）。共用侧每一个出口都会调它，
+     * 所以"不抛"这条是硬要求：它不能因为这里没有东西可恢复而失败。
+     */
+    public static void restoreModifier(KeyMapping mapping) {
+        // 空转：见类注释那一节
     }
 
     /**

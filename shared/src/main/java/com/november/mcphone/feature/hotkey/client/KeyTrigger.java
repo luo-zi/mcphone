@@ -36,6 +36,51 @@ import net.minecraft.client.gui.screens.Screen;
  * 这才收起手机再注入一次 —— 那时 {@code mc.screen == null}，判了界面的模组就看得见了。
  * 两次都没人取，就是这个键位手机触发不了，如实告诉玩家。
  *
+ * <h2>第三条：键位声明的修饰键</h2>
+ *
+ * 在 Forge 系的目标上，「按一下」其实是三个条件：<b>边沿 + 场景 + 修饰键</b>。
+ * 神化那个开「世界层级选择」的键位（默认 Ctrl + T）在自己的客户端 tick 里写的是：
+ *
+ * <pre>{@code
+ * while (OPEN_WORLD_TIER_SELECT.consumeClick() && OPEN_WORLD_TIER_SELECT.isConflictContextAndModifierActive()) { ... }
+ * }</pre>
+ *
+ * 后半个条件的实现是 {@code Screen.hasControlDown()} —— 读 GLFW 的<b>物理</b>按键状态。
+ * 遥控器注进去的是一次边沿，没有任何键被按住，于是 {@code consumeClick()} 取走了这一下
+ * （队列归 0），而 {@code &&} 右边是 false：界面不开、动作不发生，而本类看到队列归 0
+ * 还会报 {@link Outcome#OK}。<b>这正是那种"安静地不生效"的失效时刻</b> ——
+ * 它不报错，玩家以为自己点成功了。神化这一个键位就是这么点不动的。
+ *
+ * <p>所以触发之前先请 {@link HotkeyBackend#suspendModifier} 把这个键位声明的修饰键
+ * <b>让开</b>，这一下有了结果再 {@link HotkeyBackend#restoreModifier} <b>收回</b>。
+ * 让开之后等式的右边变成 {@code KeyModifier.NONE.isActive(IN_GAME)}，而它对 IN_GAME
+ * 恒为 true，模组那段 {@code while} 的条件整体成立，动作照常发生。
+ *
+ * <p><b>这不是"退化到靠键盘键位触发"。</b> 寻址照旧按<b>对象</b>，键码一个字都没动：
+ * 键位绑的是 T 还是没绑、玩家有没有把它解绑，都不影响（见 {@link HotkeyBackend}
+ * 的「为什么按对象，不按键」）—— 让开的只是那个键位自己声明的"要按住 Ctrl"这一条。
+ * 反过来，合成一次 GLFW 按键、或者调 {@code KeyMapping.click(Key)} 那条路在这里
+ * 从最开始就是走不通的：它们都要先有一个键码，而"不必为这些功能绑键位"正是这个功能的初衷。
+ *
+ * <p><b>每一个出口都要收回</b>，与下面队列那条规矩同一个道理。出口一共四条 ——
+ * {@link #succeed}、{@link #giveUp}（等超时与"界面关不掉"都走它）、中途离开世界、
+ * 以及 {@code available()} 突然变 false 那一支（那一支只收得回修饰键，队列收不回来，
+ * 见那里的注释）—— 四条都必须把修饰键放回去。硬崩恰好落在这段窗口里时，那个键位的修饰键
+ * 会停在"没有"上，直到重绑或重启；这个窗口由 {@link #TOTAL_MAX_TICKS} 兜着（最坏 30 拍，
+ * 约 1.5 秒），按可忽略处理，但它正是这条规矩必须严格执行的理由。
+ * 让开与收回都是幂等的，多收一次的代价远小于忘了收。
+ *
+ * <p><b>窗口期的代价说清楚</b>：这几秒里那个键位在全局按键索引表里从"Ctrl 那一桶"挪到了
+ * "没有修饰键"那一桶（{@link HotkeyBackend#suspendModifier} 干的就是这件事）。
+ * 于是：物理按一下那个键码会命中它（平时不会命中），而物理按 Ctrl + 那个键码反而不命中
+ * （平时会命中）。窗口很短、这时玩家正看着手机，但它是一个真实的差别，不当作"不会有"。
+ * 为什么不改用 AT 把那个私有字段直接改掉（那样索引表就不动、这个差别几乎消失）——
+ * 理由写在 {@link HotkeyBackend#suspendModifier} 的注释里。
+ *
+ * <p><b>还有一类够不着</b>：模组自己去查 {@code Screen.hasControlDown()}、读按住类的
+ * {@code isDown()}、或者自己听原始输入事件的 —— 它们要的不是"边沿 + 场景 + 修饰键"这三样，
+ * 而是别的东西（物理按键状态、按住状态、原始输入事件）。见下面「覆盖边界」。
+ *
  * <h2>每一条出口都要把队列收回来</h2>
  *
  * <b>「关掉界面会把队列清干净」是假的。</b> {@code KeyMapping.releaseAll()} 在
@@ -76,10 +121,19 @@ import net.minecraft.client.gui.screens.Screen;
  *
  * <ul>
  *   <li>覆盖：在自己的 tick 里轮询 {@code consumeClick()} 的模组 —— 这类占多数；</li>
+ *   <li>覆盖：轮询的同时还要求"在世界上"（{@link HotkeyContext#WORLD}）或"按住某个修饰键"
+ *       的模组 —— 前一件由收起手机满足，后一件由 {@link HotkeyBackend#suspendModifier} 满足，
+ *       见上面「第三条」；</li>
  *   <li>不覆盖：按住类（读 {@code isDown()} 连续生效的）—— 这个功能只做「点一下＝按一次」；</li>
  *   <li>不覆盖：自己听原始输入事件、或直接查物理按键状态的模组。本仓自己就有一个这样的键
  *       （{@code PhoneKeys.HUD_INTERACT}，它必须查 {@code InputConstants.isKeyDown}）——
- *       这类会被 {@link Outcome#UNSUPPORTED} 如实识别出来，不是静默失灵。</li>
+ *       它们<b>完全不碰</b> {@code consumeClick()} 队列的话，会被 {@link Outcome#UNSUPPORTED}
+ *       如实识别出来，不是静默失灵；而"既轮询队列、又另加一句自己的物理键判断"那种
+ *       就落到下面那一条上。</li>
+ *   <li><b>还有一类必须说清楚</b>：模组把点击<b>取走</b>了、却因为某个我们补不上的条件
+ *       而什么都没做（例如它自己查 {@code Screen.hasControlDown()}）。这类本类分辨不出来 ——
+ *       「队列归 0」是它唯一能观察到的信号，那一下确实被模组取走了。它会被报成 OK，
+ *       而实际什么都没发生。这是已知的、写在明处的边界，不是"应该不会发生"。</li>
  * </ul>
  *
  * <h2>结果怎么交给界面</h2>
@@ -118,10 +172,37 @@ public final class KeyTrigger {
      *
      * <p>不能没有：模组的轮询有可能永远不看它，而没有上限的状态机会一直挂在 pending 上，
      * 于是玩家之后再点任何键位都被「一次只处理一个」挡掉 —— 手机看起来就是坏了。
+     *
+     * <p><b>它是"单段"的</b>：{@link #injectWithNoScreen} 会把 {@link Pending#age} 归零
+     * （第二段重新计时），所以一次触发可能花掉两段。见 {@link #TOTAL_MAX_TICKS}。
      */
     private static final int MAX_TICKS = 20;
 
+    /**
+     * 一次触发的<b>总</b>等待上限（拍），不随分段归零。
+     *
+     * <p>为什么在单段上限之外还要这一条：{@link #injectWithNoScreen} 会把分段的
+     * {@link Pending#age} 归零，于是"关界面卡住"与"注入后没人取"两段的上限会<b>叠加</b>
+     * （最坏 40 拍 ≈ 2 秒）。而这段时间里，那个键位声明的修饰键是被让开着的
+     * （见类注释「第三条」的"窗口期的代价"）：窗口越长，物理按键命中错位的概率越大，
+     * 所以它得有一个不随分段重置的总上限。30 拍（≈1.5 秒）对正常路径绰绰有余
+     * —— 走的通的路是"收手机 1~2 拍 + 注入后 1~2 拍"。
+     */
+    private static final int TOTAL_MAX_TICKS = 30;
+
     private enum Stage {
+        /**
+         * 刚登记、还没决定走哪条路。
+         *
+         * <p>正常情况下同一拍就离开它（{@link #trigger} 紧接着就会写上真正的阶段）。
+         * 还看到它，说明那一拍在"登记"与"写阶段"之间抛了异常（{@link #trigger} 里
+         * 先挂 {@code pending} 再接修饰键租约，正是为了这种情况下租约还能被收回）——
+         * 那一次触发整个作废，走 {@link #giveUp}，连同让开的修饰键一起收回。
+         *
+         * <p>没有这个取值的话，那种情况下 {@code stage} 是 {@code null}，下一拍的
+         * {@code switch} 会 NPE —— 那就是"为了防一次租约残留，换来游戏崩掉"。
+         */
+        STARTING,
         /** 界面开着时就地注入的，等模组消费（键位没声明只在世界里生效的那一类） */
         INJECTED_IN_GUI,
         /** 键位声明了只在世界里生效：先请手机让开，注入留到没有界面之后 —— 一次到位 */
@@ -134,8 +215,13 @@ public final class KeyTrigger {
 
     private static final class Pending {
         final KeyMapping mapping;
-        Stage stage;
+        Stage stage = Stage.STARTING;
+
+        /** 这一段（{@link Stage} 的那两段）已经等了几拍。{@link #injectWithNoScreen} 会把它归零 */
         int age;
+
+        /** 这一次触发一共等了几拍。<b>不随分段归零</b>，见 {@link #TOTAL_MAX_TICKS} */
+        int totalAge;
 
         /** 我们请让开的那个界面。用来分辨"关不掉"是不是它自己又回来了 */
         Screen closed;
@@ -176,13 +262,29 @@ public final class KeyTrigger {
         Pending p = new Pending(mapping);
         Minecraft mc = Minecraft.getInstance();
 
+        // 【先把这一次挂上，再让开修饰键】。顺序不能反：suspendModifier 之后再抛异常
+        // （哪怕是 LOGGER 那一行），就会变成"有租约、没有 pending"—— 此后没有任何一拍
+        // 会去收它，玩家的 Ctrl 就永久停在"没有"上。先挂 pending，tick() 那一侧才有机会
+        // 走 release() 把租约兜回来。
+        // 挂上时它的阶段是 Stage.STARTING（不是 null）：真在这中间抛了，下一拍走 STARTING
+        // 那一支，把这一次作废、连带把租约收回 —— 见那个取值的注释。
+        pending = p;
+
+        // 【先让开声明的修饰键】，理由见类注释「第三条：键位声明的修饰键」。
+        // 放在这里而不是首次注入之前：这一次触发可能要走"就地注入 → 收手机 → 再注入"两段，
+        // 租约得跨过整段。收回那一边统一走 release()。
+        if (HotkeyBackend.gatesOnModifier(mapping)) {
+            HotkeyBackend.suspendModifier(mapping);
+            MCphone.LOGGER.info("[MCphone] 遥控器：{} 声明了修饰键，触发期间替玩家让开（有结果就收回）",
+                    mapping.getName());
+        }
+
         // 键位自己声明了"只在世界里生效"（Forge / NeoForge 的 KeyConflictContext.IN_GAME）时，
         // 手机开着注入的那一次它不会取 —— 手机界面就是一个界面。那就别浪费这一下：
         // 直接请手机让开，注入留到没有界面之后，玩家看到的是一次到位。
         // 见 HotkeyContext 的类注释。
         if (mc.screen != null && HotkeyBackend.contextOf(mapping).closePhoneFirst()) {
             p.stage = Stage.CLOSE_FIRST;
-            pending = p;
             MCphone.LOGGER.info("[MCphone] 遥控器：{} 声明只在世界里生效，先收起手机再触发",
                     mapping.getName());
             return;
@@ -193,7 +295,6 @@ public final class KeyTrigger {
         HotkeyBackend.reset(mapping);
         HotkeyBackend.injectClick(mapping);
         p.stage = mc.screen == null ? Stage.INJECTED_NO_GUI : Stage.INJECTED_IN_GUI;
-        pending = p;
 
         MCphone.LOGGER.info("[MCphone] 遥控器：{}（阶段 {}）", mapping.getName(), p.stage);
     }
@@ -229,10 +330,15 @@ public final class KeyTrigger {
             // fabric 是 access widener，三边都把 KeyMapping.clickCount 放开了）。写在这儿是为了
             // 它哪天变成运行期可变（比如加一个配置开关）时不至于变成"注入永远残留、而且一声不响"
             // —— 那一天得先给那一档一个不抛的 reset。
+            //
+            // 修饰键那一半<b>不一样，照收</b>：restoreModifier 走的是公开的
+            // setKeyModifierAndCode，与"这一档有没有把 clickCount 放开"无关 —— 它是这里唯一
+            // 还收得回来的东西。不收的话，那一个键位会一直按"不需要修饰键"算数。
             if (p != null) {
+                HotkeyBackend.restoreModifier(p.mapping);
                 pending = null;
                 MCphone.LOGGER.warn("[MCphone] 遥控器：目标中途变得不可用了，这一次触发作废"
-                        + "（队列无法收回：这一档不能调 reset，见上）");
+                        + "（队列收不回来：这一档不能调 reset，见上；让开的修饰键已放回）");
             }
             return;
         }
@@ -248,10 +354,11 @@ public final class KeyTrigger {
             outcome = Outcome.NONE;
             if (p == null) return;
 
-            // 队列照收 —— 它挂在 mapping 那个对象上，而对象不会跟着世界消失
-            HotkeyBackend.reset(p.mapping);
+            // 队列照收 —— 它挂在 mapping 那个对象上，而对象不会跟着世界消失；
+            // 让开的修饰键也一样要放回去（它挂在同一个对象上，更不会自己还原）
+            release(p);
             pending = null;
-            MCphone.LOGGER.info("[MCphone] 遥控器：{} 中途离开了世界，这一次作废（注入已收回）",
+            MCphone.LOGGER.info("[MCphone] 遥控器：{} 中途离开了世界，这一次作废（注入已收回、修饰键已放回）",
                     p.mapping.getName());
             return;
         }
@@ -259,6 +366,12 @@ public final class KeyTrigger {
         if (p == null) return;
 
         p.age++;
+        p.totalAge++;
+        // 总上限先判：它是这两段加起来的那条线，超了就是这一次触发整体太久（见 TOTAL_MAX_TICKS）
+        if (p.totalAge > TOTAL_MAX_TICKS) {
+            giveUp(p, "总时长超过上限");
+            return;
+        }
         if (p.age > MAX_TICKS) {
             giveUp(p, "等太久了");
             return;
@@ -271,6 +384,13 @@ public final class KeyTrigger {
         boolean consumed = HotkeyBackend.pending(p.mapping) == 0;
 
         switch (p.stage) {
+            case STARTING -> {
+                // 登记了、但那一拍没能走到"写阶段"（trigger 在中间抛了）。这一次作废，
+                // 连同让开的修饰键一起收回 —— 见 Stage.STARTING 的注释。
+                // 【这里不能看 consumed】：这个阶段压根没注入过，队列本来就是空的，
+                // 拿它当"有人消费了"会把一次根本没发生的触发报成成功。
+                giveUp(p, "登记之后没能开始");
+            }
             case INJECTED_IN_GUI -> {
                 if (consumed) {
                     succeed(p);
@@ -369,15 +489,43 @@ public final class KeyTrigger {
     }
 
     private static void succeed(Pending p) {
+        // 【先收修饰键，再清 pending】：反过来的话（先清 pending 再收），
+        // restoreModifier 一抛就没人再收它了 —— 而它的失败模式正是"玩家的 Ctrl 没了"。
+        // 顺序与 {@link #release} 是同一个道理。
+        HotkeyBackend.restoreModifier(p.mapping);
         pending = null;
         outcome = Outcome.OK;
+        // 【这里只收修饰键，不 reset】：队列这时候本来就是空的（上面那句刚读出来就是 0，
+        // 而客户端单线程，从读到这儿没有别的东西能往里塞），所以 reset 是多余的一次写。
+        // 多余不等于危险，但不写更省事：我们只动自己改过的东西。
         MCphone.LOGGER.info("[MCphone] 遥控器：{} → 模组取走了这一下", p.mapping.getName());
+    }
+
+    /**
+     * 一次触发的<b>收尾</b>：把注进去、还没人取的那一下收回，并把替玩家让开的修饰键放回去。
+     *
+     * <p>「放弃」与「离开世界」这两条出口走这里；成功那条在 {@link #succeed} 里只收修饰键
+     * （理由写在那儿）；{@code available()} 变 false 那一支只收修饰键（队列收不回来，
+     * 理由写在 {@code tick()} 里那一支的注释）。<b>四条出口都必须收修饰键</b> ——
+     * 两条都是"不收就会留下迟到后果"的东西：队列不收，那个模组以后开始轮询时会
+     * <b>迟到地响一次</b>；修饰键不收，那个键位会一直按"不需要修饰键"算数
+     * （见类注释「第三条」）。
+     *
+     * <p>【注入之前那几处 {@code reset} 不走这里】：{@link #injectWithNoScreen} 与
+     * {@code INJECTED_IN_GUI} 发现没人取时都要清一次队列再继续，那都不是出口 ——
+     * 那时租约必须留着，因为紧接着还要再注入一次。
+     *
+     * <p>两个动作都是幂等的，所以这里不必判断"这一次到底让开过没有"。
+     */
+    private static void release(Pending p) {
+        HotkeyBackend.reset(p.mapping);
+        HotkeyBackend.restoreModifier(p.mapping);
     }
 
     /** 放弃这一次。{@code why} 只进日志，玩家看到的是页面那句统一的话 */
     private static void giveUp(Pending p, String why) {
-        // 放弃就要把队列收回来，否则那一次会迟到地响（见类注释）
-        HotkeyBackend.reset(p.mapping);
+        // 放弃就要把队列收回来，否则那一次会迟到地响；修饰键同理（见类注释「第三条」）
+        release(p);
         pending = null;
         outcome = Outcome.UNSUPPORTED;
         MCphone.LOGGER.info("[MCphone] 遥控器：{} → 没有模组消费（{}），手机触发不了这个键位",
